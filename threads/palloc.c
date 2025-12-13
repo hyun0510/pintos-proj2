@@ -10,6 +10,7 @@
 #include "threads/loader.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include <list.h>
 
 /* Page allocator.  Hands out memory in page-size (or
    page-multiple) chunks.  See malloc.h for an allocator that
@@ -24,12 +25,15 @@
    By default, half of system RAM is given to the kernel pool and
    half to the user pool.  That should be huge overkill for the
    kernel pool, but that's just fine for demonstration purposes. */
-
+#define BUDDY_MAX_ORDER 11
 /* A memory pool. */
 struct pool {
     struct lock lock;        /* Mutual exclusion. */
     struct bitmap *used_map; /* Bitmap of free pages. */
     uint8_t *base;           /* Base of pool. */
+    
+    size_t last_scan_idx;
+    struct list buddy_list[BUDDY_MAX_ORDER + 1];
 };
 
 /* Two pools: one for kernel data, one for user pages. */
@@ -48,6 +52,33 @@ palloc_set_mode (enum palloc_mode mode)
 {
   palloc_mode = mode;
 }
+
+static size_t get_power(size_t page_cnt){
+    size_t power = 0;
+    size_t size = 1;
+    while(size < page_cnt){
+        size *= 2;
+        power++;
+    }
+    return power;
+}
+
+static size_t get_buddy_idx(size_t page_idx, size_t power){
+    /*size_t buddy_size = 1;
+    for(int i = 0 ; i< power; i++){
+        buddy_size *= 2;
+    }
+    size_t block_start = (page_idx/buddy_size) * buddy_size;
+    if(page_idx < block_start + buddy_size){
+        return block_start + buddy_size;
+    }else{
+        return block_start;
+    }*/
+    return page_idx ^ (1 << power);
+
+
+}
+
 
 /* Initializes the page allocator.  At most USER_PAGE_LIMIT
    pages are put into the user pool. */
@@ -80,13 +111,61 @@ palloc_get_multiple(enum palloc_flags flags, size_t page_cnt)
 {
     struct pool *pool = flags & PAL_USER ? &user_pool : &kernel_pool;
     void *pages;
-    size_t page_idx;
+    size_t page_idx = BITMAP_ERROR;
 
     if (page_cnt == 0)
         return NULL;
 
     lock_acquire(&pool->lock);
-    page_idx = bitmap_scan_and_flip(pool->used_map, 0, page_cnt, false);
+    
+    //add
+    if(palloc_mode == PAL_BUDDY){
+        size_t power = get_power(page_cnt);
+        size_t scan_power = power;
+        
+        while(scan_power <= BUDDY_MAX_ORDER && list_empty(&pool->buddy_list[scan_power])){
+            scan_power++;
+        }
+        if(scan_power <= BUDDY_MAX_ORDER){
+            struct list_elem *e = list_pop_front(&pool->buddy_list[scan_power]);
+            uint8_t *page_addr = (uint8_t *)e;
+            page_idx = (page_addr - pool->base) / PGSIZE;
+            
+            while(scan_power > power){
+                scan_power--;
+                size_t buddy_size = 1;
+                for(int i = 0; i<scan_power; i++){
+                    buddy_size *= 2;
+                }
+                size_t buddy_idx = page_idx + buddy_size;
+                
+                void *buddy_addr = pool-> base + (buddy_idx * PGSIZE);
+                struct list_elem *buddy_elem = (struct list_elem *)buddy_addr;
+                list_push_back(&pool->buddy_list[scan_power], buddy_elem);                          
+            }
+            size_t cnt =1;
+            for(int i = 0; i<power; i++){
+                    cnt *= 2;
+            }
+            bitmap_set_multiple(pool->used_map, page_idx, cnt ,true);
+        }
+    }
+    else{
+        if(palloc_mode == PAL_FIRST_FIT){
+            page_idx = bitmap_scan_and_flip(pool->used_map, 0, page_cnt, false);
+        }
+        else if(palloc_mode == PAL_NEXT_FIT){
+            page_idx = bitmap_scan_and_flip_next(pool->used_map, 0, page_cnt, false, &pool->last_scan_idx);        
+        }
+        else if(palloc_mode == PAL_BEST_FIT){
+            page_idx = bitmap_scan_and_flip_best(pool->used_map, 0, page_cnt, false);
+        }
+        else{
+            page_idx = BITMAP_ERROR;
+        }
+            
+    }
+    
     lock_release(&pool->lock);
 
     if (page_idx != BITMAP_ERROR)
@@ -97,7 +176,8 @@ palloc_get_multiple(enum palloc_flags flags, size_t page_cnt)
     if (pages != NULL) {
         if (flags & PAL_ZERO)
             memset(pages, 0, PGSIZE * page_cnt);
-    } else {
+    } 
+    else {
         if (flags & PAL_ASSERT)
             PANIC("palloc_get: out of pages");
     }
@@ -136,13 +216,62 @@ void palloc_free_multiple(void *pages, size_t page_cnt)
         NOT_REACHED();
 
     page_idx = pg_no(pages) - pg_no(pool->base);
-
-#ifndef NDEBUG
+    
+    #ifndef NDEBUG
     memset(pages, 0xcc, PGSIZE * page_cnt);
-#endif
+    #endif
+    //add
+    lock_acquire(&pool->lock);
+    
+    if(palloc_mode == PAL_BUDDY){
+        size_t power  = get_power(page_cnt);
+        size_t current_idx = page_idx;
+        size_t cnt =1 ;
+        for(int i = 0; i<power; i++){
+                cnt *= 2;
+        }
+        bitmap_set_multiple(pool->used_map, page_idx, cnt ,false);
+        
+        while(power < BUDDY_MAX_ORDER){
+            size_t buddy_idx = get_buddy_idx(current_idx, power);
+            if(buddy_idx + cnt > bitmap_size(pool->used_map)) break;
+            if (bitmap_contains(pool->used_map, buddy_idx, cnt, true)) break;
+            
+            struct list_elem *buddy_elem = (struct list_elem *)(pool->base + buddy_idx * PGSIZE);
+            bool found = false;
+            
+            if (!list_empty(&pool->buddy_list[power])) {
+                struct list_elem *e;
+                for (e = list_begin(&pool->buddy_list[power]); e != list_end(&pool->buddy_list[power]); e = list_next(e)) {
+                    if (e == buddy_elem) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
 
-    ASSERT(bitmap_all(pool->used_map, page_idx, page_cnt));
-    bitmap_set_multiple(pool->used_map, page_idx, page_cnt, false);
+            if (!found) break;
+            list_remove(buddy_elem);
+            
+            if(buddy_idx < current_idx){
+                current_idx = buddy_idx;
+            }
+            power++;
+            cnt*= 2;
+        }
+        struct list_elem *new_elem = (struct list_elem *)(pool->base + current_idx * PGSIZE);
+        list_push_back(&pool->buddy_list[power], new_elem);
+        
+    }
+    else{
+        ASSERT(bitmap_all(pool->used_map, page_idx, page_cnt));
+        bitmap_set_multiple(pool->used_map, page_idx, page_cnt, false);
+    }
+
+    lock_release(&pool->lock);
+
+
+    
 }
 
 /* Frees the page at PAGE. */
@@ -186,6 +315,42 @@ init_pool(struct pool *p, void *base, size_t page_cnt, const char *name)
     lock_init(&p->lock);
     p->used_map = bitmap_create_in_buf(page_cnt, base, bm_pages * PGSIZE);
     p->base = base + bm_pages * PGSIZE;
+    
+    //add
+    p->last_scan_idx = 0;
+    
+    for(int i = 0 ; i<=BUDDY_MAX_ORDER; i++){
+        list_init(&p->buddy_list[i]);
+    }
+    
+    size_t current_idx = 0;
+    size_t remaining_pages = page_cnt;
+    
+    while(remaining_pages > 0){
+        size_t power = get_power(remaining_pages);
+        size_t power_res = 1;
+        for(int i = 0; i<power; i++){
+                power_res *= 2;
+        }
+        while(power_res > remaining_pages){
+            if(power == 0)break;
+            power--;
+            power_res = 1 << power;
+        }
+        struct list_elem *elem = (struct list_elem  *)(p->base + current_idx * PGSIZE);
+        list_push_back(&p->buddy_list[power], elem);
+        
+        power_res = 1;
+        for(int i = 0; i<power; i++){
+                power_res *= 2;
+        }
+        size_t block_size = power_res;
+        current_idx += block_size;
+        remaining_pages -=block_size;
+    }
+    
+    
+    
 }
 
 /* Returns true if PAGE was allocated from POOL,

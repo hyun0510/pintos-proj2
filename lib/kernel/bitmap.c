@@ -309,6 +309,60 @@ bitmap_scan_and_flip(struct bitmap *b, size_t start, size_t cnt, bool value)
     return idx;
 }
 
+size_t
+bitmap_scan_and_flip_next(struct bitmap *b, size_t start, size_t cnt, bool value, size_t *last_idx)
+{
+    size_t idx = bitmap_scan(b, *last_idx, cnt, value);
+    if(idx == BITMAP_ERROR){
+        idx = bitmap_scan(b, 0, cnt, value);
+    }
+    if(idx != BITMAP_ERROR){
+        bitmap_set_multiple(b, idx, cnt, !value);
+        *last_idx = idx + cnt;
+    }
+    return idx;
+    
+}
+
+size_t
+bitmap_scan_and_flip_best(struct bitmap *b, size_t start, size_t cnt, bool value)
+{   
+    size_t idx = BITMAP_ERROR;
+    size_t best_idx = BITMAP_ERROR;
+    size_t min_len = BITMAP_ERROR;
+    size_t i = start;
+    
+    while(i < b->bit_cnt){
+        if(bitmap_test(b,i) == value){
+            size_t start_run = i;
+            size_t len =0;
+            
+            while(i < b->bit_cnt && bitmap_test(b, i) == value){
+                len++;
+                i++;
+            }
+            if(len >= cnt){
+                if(len < min_len){
+                    min_len = len;
+                    best_idx = start_run;
+                }
+                if(min_len == cnt) break;
+            }
+        }else {
+            i++;
+        }
+    }
+    
+    if(best_idx != BITMAP_ERROR){
+        bitmap_set_multiple(b, best_idx, cnt, !value);
+        return best_idx;
+    }
+    return BITMAP_ERROR;
+  
+}
+
+
+
 /* File input and output. */
 
 #ifdef FILESYS

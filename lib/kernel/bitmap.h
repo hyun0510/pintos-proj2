@@ -37,6 +37,9 @@ bool bitmap_all(const struct bitmap *, size_t start, size_t cnt);
 size_t bitmap_scan(const struct bitmap *, size_t start, size_t cnt, bool);
 size_t bitmap_scan_and_flip(struct bitmap *, size_t start, size_t cnt, bool);
 
+size_t bitmap_scan_and_flip_next(struct bitmap *b, size_t start, size_t cnt, bool value, size_t *last_idx);
+size_t bitmap_scan_and_flip_best(struct bitmap *b, size_t start, size_t cnt, bool value);
+
 /* File input and output. */
 #ifdef FILESYS
 struct file;
