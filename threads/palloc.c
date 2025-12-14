@@ -63,20 +63,8 @@ static size_t get_power(size_t page_cnt){
     return power;
 }
 
-static size_t get_buddy_idx(size_t page_idx, size_t power){
-    /*size_t buddy_size = 1;
-    for(int i = 0 ; i< power; i++){
-        buddy_size *= 2;
-    }
-    size_t block_start = (page_idx/buddy_size) * buddy_size;
-    if(page_idx < block_start + buddy_size){
-        return block_start + buddy_size;
-    }else{
-        return block_start;
-    }*/
+static size_t get_buddy_idx(size_t page_idx, size_t power){ 
     return page_idx ^ (1 << power);
-
-
 }
 
 
